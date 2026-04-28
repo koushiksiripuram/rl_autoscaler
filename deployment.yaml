@@ -1,0 +1,21 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: autoscaler-ui
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: autoscaler-ui
+  template:
+    metadata:
+      labels:
+        app: autoscaler-ui
+    spec:
+      serviceAccountName: autoscaler-sa
+      containers:
+      - name: autoscaler
+        image: rl-autoscaler:latest
+        imagePullPolicy: Never
+        ports:
+        - containerPort: 8501

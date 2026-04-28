@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: autoscaler-ui
+spec:
+  type: NodePort
+  selector:
+    app: autoscaler-ui
+  ports:
+    - port: 8501
+      targetPort: 8501
+      nodePort: 30001
