@@ -2,48 +2,52 @@ import subprocess
 import json
 from kubernetes import client, config
 
+# ---------- Config ----------
 try:
     config.load_incluster_config()
-except:
+    print("Using in-cluster config")
+except Exception as e:
+    print("Falling back:", e)
     config.load_kube_config()
 
 apps_v1 = client.AppsV1Api()
-core_v1 = client.CoreV1Api()
-
-NAMESPACE = "default"
 
 
 # ---------- Deployment Discovery ----------
 def get_target_deployments():
-    deps = apps_v1.list_namespaced_deployment(NAMESPACE)
+    deps = apps_v1.list_deployment_for_all_namespaces()
     result = []
 
     for d in deps.items:
-        labels = d.metadata.labels or {}
+        labels = d.spec.template.metadata.labels or {}
+
         if labels.get("rl-autoscale") == "true":
-            result.append(d.metadata.name)
+            result.append({
+                "name": d.metadata.name,
+                "namespace": d.metadata.namespace
+            })
 
     return result
 
 
 # ---------- Core Kubernetes ----------
-def get_current_replicas(dep_name):
-    dep = apps_v1.read_namespaced_deployment(dep_name, NAMESPACE)
+def get_current_replicas(name, namespace):
+    dep = apps_v1.read_namespaced_deployment(name, namespace)
     return dep.spec.replicas
 
 
-def scale_deployment(dep_name, new_replicas):
+def scale_deployment(name, namespace, new_replicas):
     body = {"spec": {"replicas": new_replicas}}
     apps_v1.patch_namespaced_deployment_scale(
-        name=dep_name,
-        namespace=NAMESPACE,
+        name=name,
+        namespace=namespace,
         body=body,
     )
-    print(f"🚀 {dep_name} → {new_replicas} replicas")
+    print(f"🚀 {namespace}/{name} → {new_replicas} replicas")
 
 
-def get_resource_requests(dep_name):
-    dep = apps_v1.read_namespaced_deployment(dep_name, NAMESPACE)
+def get_resource_requests(name, namespace):
+    dep = apps_v1.read_namespaced_deployment(name, namespace)
     containers = dep.spec.template.spec.containers
 
     cpu_request = 0.0
@@ -60,12 +64,12 @@ def get_resource_requests(dep_name):
 
 
 # ---------- Metrics ----------
-def get_all_pod_metrics():
+def get_all_pod_metrics(namespace):
     cmd = [
         "kubectl",
         "get",
         "--raw",
-        f"/apis/metrics.k8s.io/v1beta1/namespaces/{NAMESPACE}/pods"
+        f"/apis/metrics.k8s.io/v1beta1/namespaces/{namespace}/pods"
     ]
 
     result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -78,15 +82,14 @@ def get_all_pod_metrics():
     return data.get("items", [])
 
 
-def get_pod_metrics_for_dep(dep_name, all_pods):
-    dep = apps_v1.read_namespaced_deployment(dep_name, NAMESPACE)
+def get_pod_metrics_for_dep(name, namespace, all_pods):
+    dep = apps_v1.read_namespaced_deployment(name, namespace)
     selector = dep.spec.selector.match_labels
 
     matched = []
 
     for pod in all_pods:
         labels = pod["metadata"].get("labels", {})
-
         if all(labels.get(k) == v for k, v in selector.items()):
             matched.append(pod)
 
@@ -99,10 +102,8 @@ def parse_cpu(cpu_str):
 
     if cpu_str.endswith("n"):
         return int(cpu_str[:-1]) / 1_000_000
-
     if cpu_str.endswith("u"):
         return int(cpu_str[:-1]) / 1000
-
     if cpu_str.endswith("m"):
         return float(cpu_str[:-1])
 
@@ -116,4 +117,5 @@ def parse_memory(mem_str):
         return float(mem_str[:-2])
     if mem_str.endswith("Gi"):
         return float(mem_str[:-2]) * 1024
+
     return float(mem_str)

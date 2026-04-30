@@ -2,7 +2,6 @@ import time
 import requests
 from rl_agent import RLAgent
 from kube_helper import *
-from autoscaler import compute_desired_replicas
 
 PROMETHEUS_URL = "http://prometheus.monitoring.svc.cluster.local:9090"
 INTERVAL = 15
@@ -15,7 +14,20 @@ COOLDOWN = 60
 agents = {}
 last_scale_time = {}
 
+def compute_desired_replicas(cpu_util, mem_util, http_rps, current_replicas,
+                             target_cpu, target_mem, rps_per_pod,
+                             min_replicas, max_replicas):
 
+    cpu_based = int((cpu_util / target_cpu) * current_replicas) if cpu_util else current_replicas
+    mem_based = int((mem_util / target_mem) * current_replicas) if mem_util else current_replicas
+    rps_based = int(http_rps / rps_per_pod) + 1 if http_rps else current_replicas
+
+    desired = max(cpu_based, mem_based, rps_based)
+
+    desired = max(min_replicas, min(max_replicas, desired))
+
+    return desired, cpu_based, mem_based, rps_based
+# ---------- Prometheus ----------
 def query_prometheus(promql):
     try:
         resp = requests.get(
@@ -36,7 +48,6 @@ def query_prometheus(promql):
 
 
 def get_http_rps(dep_name):
-    # NOTE: adjust label based on your setup
     return query_prometheus(
         f'rate(nginx_http_requests_total{{app="{dep_name}"}}[1m])'
     )
@@ -46,23 +57,27 @@ print("\n🚦 Multi-Deployment RL Autoscaler Running\n")
 
 while True:
     deployments = get_target_deployments()
-    all_pods = get_all_pod_metrics()
 
     if not deployments:
         print("No rl-autoscale deployments")
         time.sleep(INTERVAL)
         continue
 
-    for dep_name in deployments:
+    for dep in deployments:
+        name = dep["name"]
+        namespace = dep["namespace"]
+        key = (namespace, name)
+
         print("\n" + "=" * 60)
-        print(f"🔍 Processing: {dep_name}")
+        print(f"🔍 Processing: {namespace}/{name}")
 
         now = time.time()
 
-        if dep_name not in last_scale_time:
-            last_scale_time[dep_name] = 0
+        if key not in last_scale_time:
+            last_scale_time[key] = 0
 
-        pods = get_pod_metrics_for_dep(dep_name, all_pods)
+        all_pods = get_all_pod_metrics(namespace)
+        pods = get_pod_metrics_for_dep(name, namespace, all_pods)
 
         if not pods:
             print("No pods found")
@@ -82,10 +97,10 @@ while True:
         avg_cpu = total_cpu / pod_count
         avg_mem = total_mem / pod_count
 
-        cpu_request, mem_request = get_resource_requests(dep_name)
+        cpu_request, mem_request = get_resource_requests(name, namespace)
 
-        if dep_name not in agents:
-            agents[dep_name] = RLAgent(
+        if key not in agents:
+            agents[key] = RLAgent(
                 state_dim=5,
                 action_dim=2,
                 min_replicas=1,
@@ -96,15 +111,15 @@ while True:
                 rps_per_pod=RPS_PER_POD
             )
 
-        agent = agents[dep_name]
+        agent = agents[key]
 
         cpu_util = (avg_cpu / cpu_request) * 100 if cpu_request else 0
         mem_util = (avg_mem / mem_request) * 100 if mem_request else 0
-        http_rps = get_http_rps(dep_name)
+        http_rps = get_http_rps(name)
 
         print(f"CPU: {cpu_util:.1f}% | MEM: {mem_util:.1f}% | RPS: {http_rps:.2f}")
 
-        current_replicas = get_current_replicas(dep_name)
+        current_replicas = get_current_replicas(name, namespace)
 
         desired, cpu_d, mem_d, rps_d = compute_desired_replicas(
             cpu_util, mem_util, http_rps, current_replicas,
@@ -114,15 +129,15 @@ while True:
 
         print(f"Desired → CPU:{cpu_d} MEM:{mem_d} RPS:{rps_d} FINAL:{desired}")
 
-        if now - last_scale_time[dep_name] < COOLDOWN:
+        if now - last_scale_time[key] < COOLDOWN:
             print("⏳ Cooldown active")
             continue
 
         # SCALE UP
         if desired > current_replicas:
             print("📈 Scaling UP")
-            scale_deployment(dep_name, desired)
-            last_scale_time[dep_name] = now
+            scale_deployment(name, namespace, desired)
+            last_scale_time[key] = now
 
         # SCALE DOWN (RL)
         elif desired < current_replicas:
@@ -131,7 +146,7 @@ while True:
                 avg_cpu,
                 avg_mem,
                 http_rps,
-                now - last_scale_time[dep_name]
+                now - last_scale_time[key]
             )
 
             action = agent.act(state, training=True)
@@ -141,8 +156,8 @@ while True:
 
                 if new_replicas < current_replicas:
                     print("📉 RL Scaling DOWN")
-                    scale_deployment(dep_name, new_replicas)
-                    last_scale_time[dep_name] = now
+                    scale_deployment(name, namespace, new_replicas)
+                    last_scale_time[key] = now
 
         else:
             print("✅ Optimal")

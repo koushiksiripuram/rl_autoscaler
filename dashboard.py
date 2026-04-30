@@ -50,7 +50,12 @@ st.markdown("""
 # -------- Kubernetes Helpers --------
 @st.cache_resource
 def load_k8s():
-    config.load_kube_config()
+    try:
+        config.load_incluster_config()
+        print("Using in-cluster config")
+    except Exception as e:
+        print("Falling back:", e)
+        config.load_kube_config()
     return client.AppsV1Api(), client.CoreV1Api()
 
 def get_all_deployments(apps_v1):

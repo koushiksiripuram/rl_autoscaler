@@ -1,0 +1,13 @@
+image:
+  repository: koushiksiripuram/rl-autoscaler
+  tag: latest
+  pullPolicy: IfNotPresent
+
+service:
+  type: NodePort
+
+prometheus:
+  url: http://prometheus.monitoring.svc.cluster.local:9090
+serviceAccount:
+  create: true
+  name: autoscaler-sa
